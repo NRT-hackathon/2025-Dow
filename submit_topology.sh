@@ -57,7 +57,7 @@ conda activate mosdef_env
 N_MONOMERS=$1
 Z_LENGTH=$2
 
-python generate_topology.py "${SMILES}" ${N_MONOMERS} "${PREFIX}_${N_MONOMERS}monomer.data"
+python3 generate_topology.py "${SMILES}" ${N_MONOMERS} "${PREFIX}_${N_MONOMERS}monomer.data"
 
 # -----------------------------------------------------------------------------
 # Submit Next Stage (Equilibration)
