@@ -1,0 +1,149 @@
+# =============================================================================
+# LAMMPS Input: Thermal Property Measurements
+# =============================================================================
+#
+# PURPOSE:
+#   Calculate thermal properties using two methods:
+#   1. Velocity autocorrelation (VACF) → DOS → Quantum-corrected C_v
+#   2. Müller-Plathe NEMD → Thermal conductivity
+#
+# USAGE:
+#   lmp -in lammps_thermal_props.in -var datafile "equilibrated.data" \
+#       -var vel_seed $RANDOM
+#
+# OUTPUT:
+#   vacf.txt                 - Velocity autocorrelation function
+#   sim_output/profile.mp    - Temperature profiles (NEMD)
+#   sim_output/traj_u.txt    - Unwrapped trajectory
+#   stage2.data / stage3.data - Checkpoints after each stage
+#
+# SIMULATION STAGES:
+#   Stage 1 (0 → 10 ps):    VACF sampling for DOS calculation
+#   Stage 2 (0 → 2 ns):     NEMD relaxation to reach steady-state T gradient
+#   Stage 3 (2 → 3 ns):     NEMD production run for thermal conductivity
+#
+# Author: Tristan Myers
+# Created: May 2025
+# =============================================================================
+
+print "Velocity seed: $(v_vel_seed)"
+
+variable Nevery equal 1000
+
+log log.lammps append
+
+# -----------------------------------------------------------------------------
+# Initialization
+# -----------------------------------------------------------------------------
+units           real
+atom_style      full
+dimension       3
+boundary        p p p
+
+# Force field styles (OPLS-AA)
+bond_style harmonic
+angle_style harmonic
+dihedral_style opls
+improper_style cvff
+pair_style lj/cut/coul/long 9 11
+pair_modify mix geometric
+special_bonds lj/coul 0.0 0.0 0.5
+kspace_style pppm 0.0001
+
+# Check for restart file
+if $(is_file(restart_files/restart_alpha)) then "jump SELF restart"
+
+read_data ${datafile}
+velocity all create 1 $(v_vel_seed) dist gaussian
+
+jump SELF init
+
+label restart
+read_restart restart_files/restart_alpha
+
+label init
+
+restart 1000 restart_files/restart_alpha restart_files/restart_beta
+kspace_style pppm 0.0001
+
+fix nvt_state all nvt temp 350 350 $(10*dt)
+
+# =============================================================================
+# STAGE 1: Velocity Autocorrelation Sampling for DOS
+# =============================================================================
+
+
+timestep 0.5
+
+thermo 1000
+variable tt1 equal step
+compute myvacf all vacf
+variable xxvacf equal c_myvacf[1]
+variable yyvacf equal c_myvacf[2]
+variable zzvacf equal c_myvacf[3]
+variable allvacf equal c_myvacf[4]
+variable tt equal (step-${tt1})*0.0005
+thermo_style custom step temp pe ke etotal press vol c_myvacf[4]
+fix vacfresult all print 1 "${tt} ${xxvacf} ${yyvacf} ${zzvacf} ${allvacf}" &
+    screen no file vacf.txt title "# Velocity Autocorrelation: time(ps) vac_x vac_y vac_z vac_total"
+
+dump 4 all custom 100 sim_output/dumpdos.nve id type x y z
+dump_modify 4 sort id
+
+
+run $(10^4)
+
+undump 4
+unfix vacfresult
+
+# =============================================================================
+# STAGE 2: NEMD Relaxation to Steady-State Temperature Gradient
+# =============================================================================
+
+timestep 1
+
+# Per-atom temperature from kinetic energy
+compute ke all ke/atom
+variable temp atom c_ke*1000/(1.5*1.987)  # Convert KE to temperature (K)
+
+# Spatial binning for temperature profile
+compute layers all chunk/atom bin/1d z lower 0.05 units reduced
+fix 2 all ave/chunk 10 100 1000 layers v_temp append sim_output/profile.mp
+
+# Müller-Plathe heat exchange between hot/cold regions
+fix 3 all thermal/conductivity $(v_Nevery) z 20
+
+dump traj_u all custom $(10^4) sim_output/traj_u.txt id mol type xu yu zu
+dump_modify traj_u sort id append yes
+
+# Temperature difference between hot and cold regions
+variable tdiff equal f_2[11][3]-f_2[1][3]
+thermo_style custom step temp epair etotal f_3 v_tdiff pe press
+thermo_modify colname f_3 E_delta colname v_tdiff dTemp_step
+thermo 1000
+
+# Run relaxation to reach steady-state gradient
+variable step_lim equal $(2 * 10^6)
+if "$(step) < $(v_step_lim)" then "run $(v_step_lim) upto"
+
+write_data stage2.data
+
+# =============================================================================
+# STAGE 3: NEMD Production Run for Thermal Conductivity
+# =============================================================================
+# Reset energy accumulation 
+
+fix 3 all thermal/conductivity $(v_Nevery) z 20
+
+fix ave all ave/time 1 1 1000 v_tdiff ave running
+thermo_style custom step temp epair etotal f_3 v_tdiff f_ave pe press
+thermo_modify colname f_3 E_delta colname v_tdiff dTemp_step colname f_ave dTemp
+
+variable step_lim equal $(3 * 10^6)
+if "$(step) < $(v_step_lim)" then "run $(v_step_lim) upto"
+
+write_data stage3.data
+
+# =============================================================================
+# END
+# =============================================================================

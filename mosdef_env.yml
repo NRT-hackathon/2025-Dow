@@ -1,0 +1,9 @@
+name: mosdef_env
+channels:
+  - conda-forge
+dependencies:
+  - openbabel
+  - python=3.9
+  - gmso
+  - mbuild
+  - foyer
